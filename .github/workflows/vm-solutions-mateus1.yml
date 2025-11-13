@@ -2,7 +2,7 @@ name: Assaí Encarte Scraper
 
 on:
   schedule:
-    - cron: '0 6 * * 1' # Toda segunda às 6h
+    - cron: '0 6 * * 1'   # Toda segunda-feira às 6h UTC
   workflow_dispatch:
 
 jobs:
@@ -11,103 +11,134 @@ jobs:
     timeout-minutes: 30
     env:
       OUTPUT_DIR: ${{ github.workspace }}/encartes
+      SCRIPT_REPO: pedroisonmycomputer/supermercados-code-project
+      SCRIPT_PATH: assai.py          # ← ajuste se estiver em sub-pasta (ex: scripts/assai.py)
 
     steps:
-      - name: Checkout
+      # -------------------------------------------------
+      # 1. Checkout do repositório que contém o workflow
+      # -------------------------------------------------
+      - name: Checkout Workflow Repo
         uses: actions/checkout@v4
+        with:
+          path: workflow-repo
 
+      # -------------------------------------------------
+      # 2. Checkout do repositório que contém o script
+      # -------------------------------------------------
+      - name: Checkout Script Repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.SCRIPT_REPO }}
+          token: ${{ secrets.GH_PAT }}   # ← necessário se o repo for privado
+          path: script-repo
+
+      # -------------------------------------------------
+      # 3. Copiar o script para o diretório de execução
+      # -------------------------------------------------
+      - name: Copiar assai.py
+        run: |
+          SRC="script-repo/${{ env.SCRIPT_PATH }}"
+          if [ ! -f "$SRC" ]; then
+            echo "ERRO: Script não encontrado em $SRC"
+            find script-repo -type f | head -20
+            exit 1
+          fi
+          cp "$SRC" ./assai.py
+          echo "assai.py copiado com sucesso."
+
+      # -------------------------------------------------
+      # 4. Configurar Python
+      # -------------------------------------------------
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Instalar dependências do sistema (jq + unzip)
+      # -------------------------------------------------
+      # 5. Instalar ferramentas do sistema (jq + unzip)
+      # -------------------------------------------------
+      - name: Instalar jq + unzip
         run: |
           sudo apt update
           sudo apt install -y jq unzip
 
-      - name: Instalar Chrome + ChromeDriver (chrome-for-testing)
+      # -------------------------------------------------
+      # 6. Instalar Chrome + ChromeDriver (chrome-for-testing)
+      # -------------------------------------------------
+      - name: Instalar Chrome + ChromeDriver
         run: |
-          # Adiciona repositório do Chrome
+          # --- Chrome -------------------------------------------------
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
-          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
+          echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" \
+            | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt update
           sudo apt install -y google-chrome-stable
 
-          # Pega versão completa do Chrome
+          # --- Versão do Chrome ---------------------------------------
           CHROME_FULL_VER=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+' || echo "0.0.0.0")
           MAJOR_VER=$(echo "$CHROME_FULL_VER" | cut -d'.' -f1)
+          echo "Chrome detectado: $CHROME_FULL_VER (major $MAJOR_VER)"
 
-          echo "Versão do Chrome detectada: $CHROME_FULL_VER (major: $MAJOR_VER)"
-
-          # URL oficial do chrome-for-testing
+          # --- Metadados chrome-for-testing ---------------------------
           JSON_URL="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
           DOWNLOAD_INFO=$(curl -s "$JSON_URL")
+          [ -z "$DOWNLOAD_INFO" ] && { echo "Falha ao obter metadados"; exit 1; }
 
-          if [ -z "$DOWNLOAD_INFO" ]; then
-            echo "Erro: falha ao baixar metadados do chrome-for-testing"
-            exit 1
-          fi
-
-          # Tenta encontrar ChromeDriver com versão EXATA
+          # --- ChromeDriver exato --------------------------------------
           DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
-            jq -r --arg ver "$CHROME_FULL_VER" \
+            jq -r --arg v "$CHROME_FULL_VER" \
             '.channels.Stable.downloads.chromedriver[]?
-             | select(.platform == "linux64")
-             | select(.url | contains($ver))
+             | select(.platform=="linux64")
+             | select(.url | contains($v))
              | .url' 2>/dev/null || echo "")
 
-          # Se não achar, usa a última versão estável do major
-          if [ -z "$DRIVER_URL" ]; then
-            echo "ChromeDriver exato não encontrado. Tentando última versão do major $MAJOR_VER..."
-            DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
-              jq -r '.channels.Stable.downloads.chromedriver[]?
-                     | select(.platform == "linux64")
-                     | .url' 2>/dev/null | head -1)
-          fi
+          # --- Fallback: última versão do mesmo major -----------------
+          [ -z "$DRIVER_URL" ] && DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+            jq -r '.channels.Stable.downloads.chromedriver[]?
+                   | select(.platform=="linux64")
+                   | .url' | head -1)
 
-          # Último fallback: tenta canal "Dev" se Stable falhar
-          if [ -z "$DRIVER_URL" ]; then
-            echo "Tentando canal Dev como fallback..."
-            DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
-              jq -r '.channels.Dev.downloads.chromedriver[]?
-                     | select(.platform == "linux64")
-                     | .url' 2>/dev/null | head -1)
-          fi
+          # --- Fallback: canal Dev ------------------------------------
+          [ -z "$DRIVER_URL" ] && DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+            jq -r '.channels.Dev.downloads.chromedriver[]?
+                   | select(.platform=="linux64")
+                   | .url' | head -1)
 
-          if [ -z "$DRIVER_URL" ]; then
-            echo "ERRO: Não foi possível encontrar ChromeDriver compatível."
-            exit 1
-          fi
+          [ -z "$DRIVER_URL" ] && { echo "ChromeDriver não encontrado"; exit 1; }
 
           echo "Baixando ChromeDriver: $DRIVER_URL"
-          wget -O /tmp/chromedriver.zip "$DRIVER_URL" || exit 1
-          unzip -o /tmp/chromedriver.zip -d /tmp || exit 1
+          wget -O /tmp/chromedriver.zip "$DRIVER_URL"
+          unzip -o /tmp/chromedriver.zip -d /tmp
 
-          # Encontra o binário (pode estar em subpasta)
-          DRIVER_PATH=$(find /tmp -name "chromedriver" -type f -executable | head -1)
-          if [ -z "$DRIVER_PATH" ]; then
-            echo "ERRO: chromedriver não encontrado após descompactar"
-            exit 1
-          fi
+          DRIVER_PATH=$(find /tmp -name chromedriver -type f -executable | head -1)
+          [ -z "$DRIVER_PATH" ] && { echo "chromedriver não encontrado após unzip"; exit 1; }
 
           sudo mv "$DRIVER_PATH" /usr/bin/chromedriver
           sudo chmod +x /usr/bin/chromedriver
-
-          echo "ChromeDriver instalado com sucesso:"
+          echo "ChromeDriver instalado:"
           chromedriver --version
 
+      # -------------------------------------------------
+      # 7. Instalar dependências Python
+      # -------------------------------------------------
       - name: Instalar dependências Python
         run: |
           python -m pip install --upgrade pip
           pip install selenium requests
 
+      # -------------------------------------------------
+      # 8. Executar o scraper
+      # -------------------------------------------------
       - name: Executar Assaí Scraper
         run: |
           mkdir -p "$OUTPUT_DIR"
           python assai.py
 
+      # -------------------------------------------------
+      # 9. Upload dos encartes
+      # -------------------------------------------------
       - name: Upload Encarte
         uses: actions/upload-artifact@v4
         with:
@@ -115,7 +146,10 @@ jobs:
           path: ${{ env.OUTPUT_DIR }}/**
           if-no-files-found: warn
 
-      - name: Upload Debug (em caso de erro)
+      # -------------------------------------------------
+      # 10. Upload de debug (apenas se falhar)
+      # -------------------------------------------------
+      - name: Upload Debug (erro)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -124,4 +158,5 @@ jobs:
             ${{ env.OUTPUT_DIR }}/ERRO_*.png
             ${{ env.OUTPUT_DIR }}/*.log
             /tmp/*.png
+            assai.py
           if-no-files-found: ignore

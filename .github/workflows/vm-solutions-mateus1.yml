@@ -30,7 +30,6 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SCRIPT_REPO }}
-          token: ${{ secrets.GH_PAT }}   # ← necessário se o repo for privado
           path: script-repo
 
       # -------------------------------------------------

@@ -2,7 +2,7 @@ name: Assaí Encarte Scraper
 
 on:
   schedule:
-    - cron: '0 6 * * 1'  # Toda segunda às 6h
+    - cron: '0 6 * * 1' # Toda segunda às 6h
   workflow_dispatch:
 
 jobs:
@@ -22,51 +22,90 @@ jobs:
           python-version: '3.11'
           cache: 'pip'
 
-      - name: Instalar dependências
+      - name: Instalar dependências do sistema (jq + unzip)
         run: |
-          python -m pip install --upgrade pip
-          pip install selenium requests
+          sudo apt update
+          sudo apt install -y jq unzip
 
-      - name: Instalar dependências do sistema
-        run: sudo apt install -y jq
-        
       - name: Instalar Chrome + ChromeDriver (chrome-for-testing)
         run: |
+          # Adiciona repositório do Chrome
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt update
           sudo apt install -y google-chrome-stable
-          
-          CHROME_FULL_VER=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+
+          # Pega versão completa do Chrome
+          CHROME_FULL_VER=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+' || echo "0.0.0.0")
           MAJOR_VER=$(echo "$CHROME_FULL_VER" | cut -d'.' -f1)
-          
+
+          echo "Versão do Chrome detectada: $CHROME_FULL_VER (major: $MAJOR_VER)"
+
+          # URL oficial do chrome-for-testing
           JSON_URL="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
           DOWNLOAD_INFO=$(curl -s "$JSON_URL")
-          
-          DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
-          jq -r --arg ver "$CHROME_FULL_VER" \
-          '.channels.Stable.downloads.chromedriver[] | select(.platform=="linux64") | select(.url | contains($ver)) | .url')
-          
-          if [ -z "$DRIVER_URL" ]; then
-          DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
-          jq -r --arg major "$MAJOR_VER" \
-          '.channels.Stable.downloads.chromedriver[] | select(.platform=="linux64") | .url' | head -1)
-          fi/]
-          
-          if [ -z "$DRIVER_URL" ]; then
-          echo "Erro: ChromeDriver não encontrado para versão $CHROME_FULL_VER"
-          exit 1
+
+          if [ -z "$DOWNLOAD_INFO" ]; then
+            echo "Erro: falha ao baixar metadados do chrome-for-testing"
+            exit 1
           fi
-          
-          wget -O /tmp/chromedriver.zip "$DRIVER_URL"
-          unzip /tmp/chromedriver.zip -d /tmp
-          sudo mv /tmp/chromedriver-linux64/chromedriver /usr/bin/chromedriver
+
+          # Tenta encontrar ChromeDriver com versão EXATA
+          DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+            jq -r --arg ver "$CHROME_FULL_VER" \
+            '.channels.Stable.downloads.chromedriver[]?
+             | select(.platform == "linux64")
+             | select(.url | contains($ver))
+             | .url' 2>/dev/null || echo "")
+
+          # Se não achar, usa a última versão estável do major
+          if [ -z "$DRIVER_URL" ]; then
+            echo "ChromeDriver exato não encontrado. Tentando última versão do major $MAJOR_VER..."
+            DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+              jq -r '.channels.Stable.downloads.chromedriver[]?
+                     | select(.platform == "linux64")
+                     | .url' 2>/dev/null | head -1)
+          fi
+
+          # Último fallback: tenta canal "Dev" se Stable falhar
+          if [ -z "$DRIVER_URL" ]; then
+            echo "Tentando canal Dev como fallback..."
+            DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+              jq -r '.channels.Dev.downloads.chromedriver[]?
+                     | select(.platform == "linux64")
+                     | .url' 2>/dev/null | head -1)
+          fi
+
+          if [ -z "$DRIVER_URL" ]; then
+            echo "ERRO: Não foi possível encontrar ChromeDriver compatível."
+            exit 1
+          fi
+
+          echo "Baixando ChromeDriver: $DRIVER_URL"
+          wget -O /tmp/chromedriver.zip "$DRIVER_URL" || exit 1
+          unzip -o /tmp/chromedriver.zip -d /tmp || exit 1
+
+          # Encontra o binário (pode estar em subpasta)
+          DRIVER_PATH=$(find /tmp -name "chromedriver" -type f -executable | head -1)
+          if [ -z "$DRIVER_PATH" ]; then
+            echo "ERRO: chromedriver não encontrado após descompactar"
+            exit 1
+          fi
+
+          sudo mv "$DRIVER_PATH" /usr/bin/chromedriver
           sudo chmod +x /usr/bin/chromedriver
-          
+
+          echo "ChromeDriver instalado com sucesso:"
           chromedriver --version
+
+      - name: Instalar dependências Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install selenium requests
 
       - name: Executar Assaí Scraper
         run: |
+          mkdir -p "$OUTPUT_DIR"
           python assai.py
 
       - name: Upload Encarte
@@ -76,9 +115,13 @@ jobs:
           path: ${{ env.OUTPUT_DIR }}/**
           if-no-files-found: warn
 
-      - name: Upload Debug (erro)
+      - name: Upload Debug (em caso de erro)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: debug-assai-erro
-          path: ${{ env.OUTPUT_DIR }}/ERRO_*.png
+          name: debug-assai-erro-${{ github.run_attempt }}
+          path: |
+            ${{ env.OUTPUT_DIR }}/ERRO_*.png
+            ${{ env.OUTPUT_DIR }}/*.log
+            /tmp/*.png
+          if-no-files-found: ignore

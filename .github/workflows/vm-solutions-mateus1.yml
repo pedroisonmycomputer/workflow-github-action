@@ -27,19 +27,43 @@ jobs:
           python -m pip install --upgrade pip
           pip install selenium requests
 
-      - name: Instalar Chrome + ChromeDriver
+      - name: Instalar dependências do sistema
+        run: sudo apt install -y jq
+        
+      - name: Instalar Chrome + ChromeDriver (chrome-for-testing)
         run: |
           wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
           echo "deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main" | sudo tee /etc/apt/sources.list.d/google-chrome.list
           sudo apt update
           sudo apt install -y google-chrome-stable
-
-          CHROME_VER=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+')
-          DRIVER_VER=$(curl -s "https://chromedriver.storage.googleapis.com/LATEST_RELEASE_${CHROME_VER%%.*}")
-          wget -O /tmp/chromedriver.zip "https://chromedriver.storage.googleapis.com/${DRIVER_VER}/chromedriver_linux64.zip"
+          
+          CHROME_FULL_VER=$(google-chrome --version | grep -oP '\d+\.\d+\.\d+\.\d+')
+          MAJOR_VER=$(echo "$CHROME_FULL_VER" | cut -d'.' -f1)
+          
+          JSON_URL="https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json"
+          DOWNLOAD_INFO=$(curl -s "$JSON_URL")
+          
+          DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+          jq -r --arg ver "$CHROME_FULL_VER" \
+          '.channels.Stable.downloads.chromedriver[] | select(.platform=="linux64") | select(.url | contains($ver)) | .url')
+          
+          if [ -z "$DRIVER_URL" ]; then
+          DRIVER_URL=$(echo "$DOWNLOAD_INFO" | \
+          jq -r --arg major "$MAJOR_VER" \
+          '.channels.Stable.downloads.chromedriver[] | select(.platform=="linux64") | .url' | head -1)
+          fi/]
+          
+          if [ -z "$DRIVER_URL" ]; then
+          echo "Erro: ChromeDriver não encontrado para versão $CHROME_FULL_VER"
+          exit 1
+          fi
+          
+          wget -O /tmp/chromedriver.zip "$DRIVER_URL"
           unzip /tmp/chromedriver.zip -d /tmp
-          sudo mv /tmp/chromedriver /usr/bin/chromedriver
+          sudo mv /tmp/chromedriver-linux64/chromedriver /usr/bin/chromedriver
           sudo chmod +x /usr/bin/chromedriver
+          
+          chromedriver --version
 
       - name: Executar Assaí Scraper
         run: |
